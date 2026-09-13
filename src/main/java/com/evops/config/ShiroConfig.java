@@ -21,6 +21,8 @@ public class ShiroConfig {
         DefaultShiroFilterChainDefinition chain = new DefaultShiroFilterChainDefinition();
         chain.addPathDefinition("/api/health", "anon");
         chain.addPathDefinition("/error", "anon");
+        // 业务 REST 接口统一启用 HTTP Basic 认证（内置账号 bootstrap/bootstrap）
+        chain.addPathDefinition("/api/**", "authcBasic");
         chain.addPathDefinition("/**", "authc");
         return chain;
     }
