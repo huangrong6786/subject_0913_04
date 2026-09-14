@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 
 @TableName("t_test_section")
 public class TestSection extends BaseEntity {
+    private Long tenantId;
     private Long wellGroupId;
     private String sectionCode;
     private String sectionName;
@@ -17,6 +18,8 @@ public class TestSection extends BaseEntity {
     @Version
     private Integer version;
 
+    public Long getTenantId() { return tenantId; }
+    public void setTenantId(Long tenantId) { this.tenantId = tenantId; }
     public Long getWellGroupId() { return wellGroupId; }
     public void setWellGroupId(Long wellGroupId) { this.wellGroupId = wellGroupId; }
     public String getSectionCode() { return sectionCode; }

@@ -24,6 +24,9 @@ import com.evops.geothermal.mapper.ReinjectionShiftMapper;
 import com.evops.geothermal.mapper.TestSectionMapper;
 import com.evops.geothermal.mapper.WellGroupMapper;
 import com.evops.geothermal.mapper.WellheadReadingMapper;
+import com.evops.geothermal.security.CurrentAccount;
+import com.evops.geothermal.security.DataScope;
+import com.evops.geothermal.security.QueryScopeApplier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -49,6 +52,8 @@ public class GeothermalService {
     private final MonitorBatchMapper batchMapper;
     private final WellheadReadingMapper readingMapper;
     private final AuditService auditService;
+    private final CurrentAccount currentAccount;
+    private final QueryScopeApplier scopeApplier;
 
     public GeothermalService(WellGroupMapper groupMapper,
                              TestSectionMapper sectionMapper,
@@ -56,7 +61,9 @@ public class GeothermalService {
                              ReinjectionShiftMapper shiftMapper,
                              MonitorBatchMapper batchMapper,
                              WellheadReadingMapper readingMapper,
-                             AuditService auditService) {
+                             AuditService auditService,
+                             CurrentAccount currentAccount,
+                             QueryScopeApplier scopeApplier) {
         this.groupMapper = groupMapper;
         this.sectionMapper = sectionMapper;
         this.pointMapper = pointMapper;
@@ -64,6 +71,25 @@ public class GeothermalService {
         this.batchMapper = batchMapper;
         this.readingMapper = readingMapper;
         this.auditService = auditService;
+        this.currentAccount = currentAccount;
+        this.scopeApplier = scopeApplier;
+    }
+
+    /** 写链路租户守卫：只能在本租户对象上操作，下级对象租户从所属上级继承。 */
+    private long currentTenantId() {
+        return currentAccount.get().getTenantId();
+    }
+
+    /** 读链路数据权限范围：租户隔离必带；只读账号再叠加对象授权收敛。 */
+    private DataScope currentScope() {
+        return new DataScope(currentAccount.get().getTenantId(), currentAccount.get().getAccount(),
+                !currentAccount.get().isTenantAdmin());
+    }
+
+    private void assertSameTenant(Long resourceTenantId) {
+        if (resourceTenantId != null && resourceTenantId.longValue() != currentTenantId()) {
+            throw new BizException("FORBIDDEN", "不能操作其他租户的对象");
+        }
     }
 
     private String timezone() {
@@ -87,6 +113,7 @@ public class GeothermalService {
             throw new BizException("DUPLICATE_KEY", "井组编码已存在: " + req.getGroupCode());
         }
         WellGroup group = new WellGroup();
+        group.setTenantId(currentTenantId());
         group.setGroupCode(req.getGroupCode());
         group.setGroupName(req.getGroupName());
         group.setLocation(req.getLocation());
@@ -110,18 +137,22 @@ public class GeothermalService {
     }
 
     public List<WellGroup> listGroups() {
-        return groupMapper.selectList(new QueryWrapper<WellGroup>().orderByAsc("group_code"));
+        QueryWrapper<WellGroup> qw = new QueryWrapper<>();
+        scopeApplier.scopeWellGroupTable(qw, currentScope());
+        return groupMapper.selectList(qw.orderByAsc("group_code"));
     }
 
     // ============================ 试验段 ============================
 
     @Transactional
     public TestSection createSection(TestSectionRequest req) {
-        requireGroup(req.getWellGroupId());
+        WellGroup ownerGroup = requireGroup(req.getWellGroupId());
+        assertSameTenant(ownerGroup.getTenantId());
         if (sectionMapper.selectCount(new QueryWrapper<TestSection>().eq("section_code", req.getSectionCode())) > 0) {
             throw new BizException("DUPLICATE_KEY", "试验段编码已存在: " + req.getSectionCode());
         }
         TestSection section = new TestSection();
+        section.setTenantId(ownerGroup.getTenantId());
         section.setWellGroupId(req.getWellGroupId());
         section.setSectionCode(req.getSectionCode());
         section.setSectionName(req.getSectionName());
@@ -149,6 +180,7 @@ public class GeothermalService {
 
     public List<TestSection> listSections(Long groupId) {
         QueryWrapper<TestSection> qw = new QueryWrapper<>();
+        scopeApplier.scopeByGroupColumn(qw, currentScope(), "well_group_id");
         if (groupId != null) {
             qw.eq("well_group_id", groupId);
         }
@@ -159,11 +191,13 @@ public class GeothermalService {
 
     @Transactional
     public MonitorPoint createPoint(MonitorPointRequest req) {
-        requireSection(req.getTestSectionId());
+        TestSection ownerSection = requireSection(req.getTestSectionId());
+        assertSameTenant(ownerSection.getTenantId());
         if (pointMapper.selectCount(new QueryWrapper<MonitorPoint>().eq("point_code", req.getPointCode())) > 0) {
             throw new BizException("DUPLICATE_KEY", "监测点编码已存在: " + req.getPointCode());
         }
         MonitorPoint point = new MonitorPoint();
+        point.setTenantId(ownerSection.getTenantId());
         point.setTestSectionId(req.getTestSectionId());
         point.setPointCode(req.getPointCode());
         point.setPointName(req.getPointName());
@@ -190,6 +224,7 @@ public class GeothermalService {
 
     public List<MonitorPoint> listPoints(Long sectionId) {
         QueryWrapper<MonitorPoint> qw = new QueryWrapper<>();
+        scopeApplier.scopeBySectionColumn(qw, currentScope(), "test_section_id");
         if (sectionId != null) {
             qw.eq("test_section_id", sectionId);
         }
@@ -200,14 +235,15 @@ public class GeothermalService {
 
     @Transactional
     public ReinjectionShift createShift(ShiftRequest req) {
-        requireSection(req.getTestSectionId());
-        TestSection section = sectionMapper.selectById(req.getTestSectionId());
+        TestSection section = requireSection(req.getTestSectionId());
+        assertSameTenant(section.getTenantId());
         WellGroup group = requireGroup(section.getWellGroupId());
         String shiftCode = buildShiftCode(group.getGroupCode(), section.getSectionCode(),
                 req.getShiftDate(), req.getShiftIndex());
         assertShiftUnique(req.getTestSectionId(), req.getShiftDate(), req.getShiftIndex(), shiftCode);
 
         ReinjectionShift shift = new ReinjectionShift();
+        shift.setTenantId(section.getTenantId());
         shift.setTestSectionId(req.getTestSectionId());
         shift.setShiftDate(req.getShiftDate());
         shift.setShiftIndex(req.getShiftIndex());
@@ -252,6 +288,7 @@ public class GeothermalService {
 
     public List<ReinjectionShift> listShifts(Long sectionId, LocalDate shiftDate) {
         QueryWrapper<ReinjectionShift> qw = new QueryWrapper<>();
+        scopeApplier.scopeBySectionColumn(qw, currentScope(), "test_section_id");
         if (sectionId != null) {
             qw.eq("test_section_id", sectionId);
         }
@@ -291,10 +328,12 @@ public class GeothermalService {
         final MonitorPoint point;
         if (req.getShiftId() != null) {
             shift = requireShift(req.getShiftId());
+            assertSameTenant(shift.getTenantId());
             if (req.getMonitorPointId() == null) {
                 throw new BizException("VALIDATION", "指定班次时必须提供 monitorPointId");
             }
             point = requirePoint(req.getMonitorPointId());
+            assertSameTenant(point.getTenantId());
         } else {
             if (req.getGroupCode() == null || req.getSectionCode() == null || req.getBizDate() == null) {
                 throw new BizException("VALIDATION",
@@ -329,6 +368,9 @@ public class GeothermalService {
         }
 
         MonitorBatch batch = new MonitorBatch();
+        batch.setTenantId(section.getTenantId());
+        batch.setWellGroupId(group.getId());
+        batch.setTestSectionId(section.getId());
         batch.setShiftId(shift.getId());
         batch.setMonitorPointId(point.getId());
         batch.setBatchNo(batchNo);
@@ -354,6 +396,7 @@ public class GeothermalService {
         String shiftCode = buildShiftCode(group.getGroupCode(), section.getSectionCode(), date, index);
         assertShiftUnique(section.getId(), date, index, shiftCode);
         ReinjectionShift shift = new ReinjectionShift();
+        shift.setTenantId(section.getTenantId());
         shift.setTestSectionId(section.getId());
         shift.setShiftDate(date);
         shift.setShiftIndex(index);
@@ -394,9 +437,12 @@ public class GeothermalService {
     public MonitorBatch submitReadings(Long batchId, ReadingSubmitRequest req) {
         MonitorBatch batch = requireBatch(batchId);
         BatchStatus status = BatchStatus.valueOf(batch.getStatus());
-        if (status == BatchStatus.ACCEPTED || status == BatchStatus.ACCOUNTED) {
+        // 压力/温度/流量/回灌量的原子落库是一次性的 DRAFT -> RECORDED 提交：
+        // 已提交（含被并发请求抢先推进）或已验收/落账的批次都不能再次写入，
+        // 既保证业务语义，也让并发提交在任意交错时序下都恰好只有一个请求成功。
+        if (status != BatchStatus.DRAFT) {
             throw new BizException("INVALID_TRANSITION",
-                    "批次已" + (status == BatchStatus.ACCEPTED ? "验收" : "落账") + "，不能再写入读数: " + batch.getBatchNo());
+                    "批次不是草稿状态（当前 " + status + "），不能重复提交读数: " + batch.getBatchNo());
         }
         ReinjectionShift shift = requireShift(batch.getShiftId());
         TestSection section = requireSection(shift.getTestSectionId());
@@ -617,6 +663,7 @@ public class GeothermalService {
 
     public List<MonitorBatch> listBatches(String status) {
         QueryWrapper<MonitorBatch> qw = new QueryWrapper<>();
+        scopeApplier.scopeByGroupColumn(qw, currentScope(), "well_group_id");
         if (status != null && !status.trim().isEmpty()) {
             qw.eq("status", status);
         }
@@ -657,6 +704,7 @@ public class GeothermalService {
         if (g == null) {
             throw new BizException("NOT_FOUND", "井组不存在: " + id);
         }
+        assertSameTenant(g.getTenantId());
         return g;
     }
 
@@ -664,7 +712,8 @@ public class GeothermalService {
         if (code == null) {
             throw new BizException("VALIDATION", "缺少 groupCode");
         }
-        WellGroup g = groupMapper.selectOne(new QueryWrapper<WellGroup>().eq("group_code", code), false);
+        WellGroup g = groupMapper.selectOne(new QueryWrapper<WellGroup>()
+                .eq("group_code", code).eq("tenant_id", currentTenantId()), false);
         if (g == null) {
             throw new BizException("NOT_FOUND", "井组不存在: " + code);
         }
@@ -676,6 +725,7 @@ public class GeothermalService {
         if (s == null) {
             throw new BizException("NOT_FOUND", "试验段不存在: " + id);
         }
+        assertSameTenant(s.getTenantId());
         return s;
     }
 
@@ -683,7 +733,8 @@ public class GeothermalService {
         if (code == null) {
             throw new BizException("VALIDATION", "缺少 sectionCode");
         }
-        TestSection s = sectionMapper.selectOne(new QueryWrapper<TestSection>().eq("section_code", code), false);
+        TestSection s = sectionMapper.selectOne(new QueryWrapper<TestSection>()
+                .eq("section_code", code).eq("tenant_id", currentTenantId()), false);
         if (s == null) {
             throw new BizException("NOT_FOUND", "试验段不存在: " + code);
         }
@@ -695,6 +746,7 @@ public class GeothermalService {
         if (p == null) {
             throw new BizException("NOT_FOUND", "监测点不存在: " + id);
         }
+        assertSameTenant(p.getTenantId());
         return p;
     }
 
@@ -702,7 +754,8 @@ public class GeothermalService {
         if (code == null) {
             throw new BizException("VALIDATION", "缺少 pointCode");
         }
-        MonitorPoint p = pointMapper.selectOne(new QueryWrapper<MonitorPoint>().eq("point_code", code), false);
+        MonitorPoint p = pointMapper.selectOne(new QueryWrapper<MonitorPoint>()
+                .eq("point_code", code).eq("tenant_id", currentTenantId()), false);
         if (p == null) {
             throw new BizException("NOT_FOUND", "监测点不存在: " + code);
         }
@@ -714,6 +767,7 @@ public class GeothermalService {
         if (s == null) {
             throw new BizException("NOT_FOUND", "回灌班次不存在: " + id);
         }
+        assertSameTenant(s.getTenantId());
         return s;
     }
 
@@ -722,6 +776,7 @@ public class GeothermalService {
         if (b == null) {
             throw new BizException("NOT_FOUND", "监测批次不存在: " + id);
         }
+        assertSameTenant(b.getTenantId());
         return b;
     }
 }

@@ -9,3 +9,8 @@ mybatis-plus:
   global-config:
     db-config:
       id-type: auto
+
+# 压测演示数据装载开关：配置后可用 POST /api/admin/demo-seed（头 X-Seed-Token 同值）触发
+evops:
+  demo-seed:
+    token: ""        # 例如 "seed-2026"；留空则装载接口禁用

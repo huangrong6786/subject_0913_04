@@ -6,6 +6,7 @@ import com.evops.common.BaseEntity;
 
 @TableName("t_well_group")
 public class WellGroup extends BaseEntity {
+    private Long tenantId;
     private String groupCode;
     private String groupName;
     private String location;
@@ -13,6 +14,8 @@ public class WellGroup extends BaseEntity {
     @Version
     private Integer version;
 
+    public Long getTenantId() { return tenantId; }
+    public void setTenantId(Long tenantId) { this.tenantId = tenantId; }
     public String getGroupCode() { return groupCode; }
     public void setGroupCode(String groupCode) { this.groupCode = groupCode; }
     public String getGroupName() { return groupName; }

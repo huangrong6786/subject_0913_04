@@ -9,6 +9,7 @@ import java.time.LocalDate;
 
 @TableName("t_reinjection_shift")
 public class ReinjectionShift extends BaseEntity {
+    private Long tenantId;
     private Long testSectionId;
     private LocalDate shiftDate;
     private Integer shiftIndex;
@@ -19,6 +20,8 @@ public class ReinjectionShift extends BaseEntity {
     @Version
     private Integer version;
 
+    public Long getTenantId() { return tenantId; }
+    public void setTenantId(Long tenantId) { this.tenantId = tenantId; }
     public Long getTestSectionId() { return testSectionId; }
     public void setTestSectionId(Long testSectionId) { this.testSectionId = testSectionId; }
     public LocalDate getShiftDate() { return shiftDate; }

@@ -25,6 +25,14 @@ public class GlobalExceptionHandler {
         return ApiResponse.fail(msg);
     }
 
+    /** GET 查询参数绑定到命令对象失败（如日期格式错误）。 */
+    @ExceptionHandler(org.springframework.validation.BindException.class)
+    public ApiResponse<Void> handleBind(org.springframework.validation.BindException ex) {
+        String msg = ex.getBindingResult().getFieldErrors().isEmpty() ? "查询参数格式错误"
+                : ex.getBindingResult().getFieldErrors().get(0).getField() + " 参数格式错误";
+        return ApiResponse.fail(msg);
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ApiResponse<Void> handleIllegalArgument(IllegalArgumentException ex) {
         return ApiResponse.fail(ex.getMessage());

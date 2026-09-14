@@ -9,6 +9,9 @@ import java.time.LocalDateTime;
 
 @TableName("t_monitor_batch")
 public class MonitorBatch extends BaseEntity {
+    private Long tenantId;
+    private Long wellGroupId;
+    private Long testSectionId;
     private Long shiftId;
     private Long monitorPointId;
     private String batchNo;
@@ -22,6 +25,12 @@ public class MonitorBatch extends BaseEntity {
     @Version
     private Integer version;
 
+    public Long getTenantId() { return tenantId; }
+    public void setTenantId(Long tenantId) { this.tenantId = tenantId; }
+    public Long getWellGroupId() { return wellGroupId; }
+    public void setWellGroupId(Long wellGroupId) { this.wellGroupId = wellGroupId; }
+    public Long getTestSectionId() { return testSectionId; }
+    public void setTestSectionId(Long testSectionId) { this.testSectionId = testSectionId; }
     public Long getShiftId() { return shiftId; }
     public void setShiftId(Long shiftId) { this.shiftId = shiftId; }
     public Long getMonitorPointId() { return monitorPointId; }

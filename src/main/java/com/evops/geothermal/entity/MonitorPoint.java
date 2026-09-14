@@ -6,6 +6,7 @@ import com.evops.common.BaseEntity;
 
 @TableName("t_monitor_point")
 public class MonitorPoint extends BaseEntity {
+    private Long tenantId;
     private Long testSectionId;
     private String pointCode;
     private String pointName;
@@ -15,6 +16,8 @@ public class MonitorPoint extends BaseEntity {
     @Version
     private Integer version;
 
+    public Long getTenantId() { return tenantId; }
+    public void setTenantId(Long tenantId) { this.tenantId = tenantId; }
     public Long getTestSectionId() { return testSectionId; }
     public void setTestSectionId(Long testSectionId) { this.testSectionId = testSectionId; }
     public String getPointCode() { return pointCode; }

@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.evops.geothermal.mapper.TelemetryQueryMapper">
+
+    <!--
+      秒级遥测聚合。
+      关键：每条语句都无条件下推 t.partition_date 范围谓词（分区裁剪）+ tenant_id 租户谓词，
+      服务层保证分区范围必填且封顶时间窗，因此物理上不可能退化为全表扫描。
+      restricted 账号再叠加对象授权井组集合。
+    -->
+
+    <sql id="scopeAndPartition">
+        AND t.tenant_id = #{p.tenantId}
+        AND t.partition_date <![CDATA[>=]]> #{p.partitionFrom}
+        AND t.partition_date <![CDATA[<=]]> #{p.partitionTo}
+        <if test="p.restricted">
+            AND t.well_group_id IN (
+                SELECT og.object_id
+                FROM t_object_grant og
+                WHERE og.tenant_id = #{p.tenantId}
+                  AND og.grantee_account = #{p.account}
+                  AND og.object_type = 'WELL_GROUP'
+            )
+        </if>
+        <if test="p.groupId != null">
+            AND t.well_group_id = #{p.groupId}
+        </if>
+        <if test="p.monitorPointId != null">
+            AND t.monitor_point_id = #{p.monitorPointId}
+        </if>
+    </sql>
+
+    <!--
+      时间桶（墙钟对齐到当日零点，bucketSeconds 整除 86400）：
+      派生表 x 先算出 bucket_start，外层仅按 (井组, bucket_start) 分组聚合，规避严格 GROUP BY 限制。
+    -->
+    <select id="aggregateBuckets" resultType="com.evops.geothermal.dto.TelemetryBucketRow">
+        SELECT
+            x.group_id        AS group_id,
+            x.group_code      AS group_code,
+            x.bucket_start    AS bucket_start,
+            COUNT(*)          AS sample_count,
+            MIN(x.pressure_mpa)  AS pressure_min,
+            MAX(x.pressure_mpa)  AS pressure_max,
+            AVG(x.pressure_mpa)  AS pressure_avg,
+            AVG(x.temperature_c) AS temperature_avg,
+            AVG(x.flow_m3h)      AS flow_avg
+        FROM (
+            SELECT
+                t.well_group_id AS group_id,
+                g.group_code    AS group_code,
+                t.pressure_mpa  AS pressure_mpa,
+                t.temperature_c AS temperature_c,
+                t.flow_m3h      AS flow_m3h,
+                DATEADD('SECOND',
+                    FLOOR((EXTRACT(HOUR FROM t.reading_time) * 3600
+                           + EXTRACT(MINUTE FROM t.reading_time) * 60
+                           + EXTRACT(SECOND FROM t.reading_time)) / #{p.bucketSeconds})
+                        * #{p.bucketSeconds},
+                    CAST(t.reading_time AS DATE)) AS bucket_start
+            FROM t_wellhead_telemetry t
+            INNER JOIN t_well_group g ON g.id = t.well_group_id
+            <where>
+                <include refid="scopeAndPartition"/>
+            </where>
+        ) x
+        GROUP BY x.group_id, x.group_code, x.bucket_start
+        ORDER BY x.group_id ASC, x.bucket_start ASC
+    </select>
+
+    <!--
+      40 井组压力汇总：单条 GROUP BY 产出全部命中井组，禁止应用层逐井查询。
+      latest 压力用关联标量子查询（由数据库集合运算完成，不是应用 N+1），
+      子查询同样带租户 + 分区谓词以走裁剪索引。
+    -->
+    <select id="wellGroupPressure" resultType="com.evops.geothermal.dto.WellGroupPressureRow">
+        SELECT
+            t.well_group_id AS group_id,
+            g.group_code    AS group_code,
+            g.group_name    AS group_name,
+            COUNT(*)        AS sample_count,
+            MIN(t.pressure_mpa) AS pressure_min,
+            MAX(t.pressure_mpa) AS pressure_max,
+            AVG(t.pressure_mpa) AS pressure_avg,
+            (SELECT t3.pressure_mpa FROM t_wellhead_telemetry t3
+                WHERE t3.tenant_id = #{p.tenantId}
+                  AND t3.partition_date <![CDATA[>=]]> #{p.dateFrom}
+                  AND t3.partition_date <![CDATA[<=]]> #{p.dateTo}
+                  AND t3.well_group_id = t.well_group_id
+                ORDER BY t3.reading_time DESC, t3.id DESC
+                LIMIT 1) AS latest_pressure,
+            MAX(t.reading_time) AS latest_reading_time
+        FROM t_wellhead_telemetry t
+        INNER JOIN t_well_group g ON g.id = t.well_group_id
+        <where>
+            AND t.tenant_id = #{p.tenantId}
+            AND t.partition_date <![CDATA[>=]]> #{p.dateFrom}
+            AND t.partition_date <![CDATA[<=]]> #{p.dateTo}
+            <if test="p.restricted">
+                AND t.well_group_id IN (
+                    SELECT og.object_id
+                    FROM t_object_grant og
+                    WHERE og.tenant_id = #{p.tenantId}
+                      AND og.grantee_account = #{p.account}
+                      AND og.object_type = 'WELL_GROUP'
+                )
+            </if>
+            <if test="p.groupIds != null and p.groupIds.size() > 0">
+                AND t.well_group_id IN
+                <foreach collection="p.groupIds" item="gid" open="(" separator="," close=")">
+                    #{gid}
+                </foreach>
+            </if>
+        </where>
+        GROUP BY t.well_group_id, g.group_code, g.group_name
+        ORDER BY g.group_code ASC
+    </select>
+</mapper>

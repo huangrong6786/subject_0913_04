@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.evops.geothermal.mapper.GeothermalQueryMapper">
+
+    <!--
+      运营检索：以主表 t_monitor_batch 单表为驱动。
+      - 多对一维度（井组/试验段/班次/监测点）走 JOIN，不会放大主表行数；
+      - 一对多井口压力走 EXISTS（命中判定）与标量子查询（展示 min/max），主表绝不放大、不重复；
+      - 租户谓词恒带；restricted 时叠加对象授权子查询（授权单元为井组）；
+      - 确定性排序 (biz_date DESC, id ASC)，keyset 游标 / offset 二选一并行可用。
+    -->
+
+    <sql id="dataScope">
+        AND b.tenant_id = #{p.tenantId}
+        <if test="p.restricted">
+            AND b.well_group_id IN (
+                SELECT og.object_id
+                FROM t_object_grant og
+                WHERE og.tenant_id = #{p.tenantId}
+                  AND og.grantee_account = #{p.account}
+                  AND og.object_type = 'WELL_GROUP'
+            )
+        </if>
+    </sql>
+
+    <sql id="filters">
+        <if test="p.groupId != null">
+            AND b.well_group_id = #{p.groupId}
+        </if>
+        <if test="p.sectionId != null">
+            AND b.test_section_id = #{p.sectionId}
+        </if>
+        <if test="p.status != null and p.status != ''">
+            AND b.status = #{p.status}
+        </if>
+        <if test="p.bizDateFrom != null">
+            AND b.biz_date <![CDATA[>=]]> #{p.bizDateFrom}
+        </if>
+        <if test="p.bizDateTo != null">
+            AND b.biz_date <![CDATA[<=]]> #{p.bizDateTo}
+        </if>
+        <!-- 井口压力区间：关联一对多读数表，但用 EXISTS 半连接，主表不放大 -->
+        <if test="p.pressureMin != null or p.pressureMax != null">
+            AND EXISTS (
+                SELECT 1
+                FROM t_wellhead_reading r
+                WHERE r.batch_id = b.id
+                <if test="p.pressureMin != null">
+                    AND r.pressure_mpa <![CDATA[>=]]> #{p.pressureMin}
+                </if>
+                <if test="p.pressureMax != null">
+                    AND r.pressure_mpa <![CDATA[<=]]> #{p.pressureMax}
+                </if>
+            )
+        </if>
+    </sql>
+
+    <!-- keyset 游标：排序 biz_date DESC, id ASC 下的“上一页最后一条之后” -->
+    <sql id="cursorSeek">
+        <if test="p.cursorBizDate != null and p.cursorId != null">
+            AND (
+                b.biz_date <![CDATA[<]]> #{p.cursorBizDate}
+                OR (b.biz_date = #{p.cursorBizDate} AND b.id <![CDATA[>]]> #{p.cursorId})
+            )
+        </if>
+    </sql>
+
+    <select id="searchBatches" resultType="com.evops.geothermal.dto.OperationBatchRow">
+        SELECT
+            b.id                AS id,
+            b.batch_no          AS batch_no,
+            b.biz_date          AS biz_date,
+            b.status            AS status,
+            b.well_group_id     AS group_id,
+            g.group_code        AS group_code,
+            g.group_name        AS group_name,
+            b.test_section_id   AS section_id,
+            s.section_code      AS section_code,
+            b.shift_id          AS shift_id,
+            sh.shift_code       AS shift_code,
+            b.monitor_point_id  AS point_id,
+            mp.point_code       AS point_code,
+            mp.well_name        AS well_name,
+            (SELECT MIN(r.pressure_mpa) FROM t_wellhead_reading r
+                WHERE r.batch_id = b.id) AS batch_pressure_min,
+            (SELECT MAX(r.pressure_mpa) FROM t_wellhead_reading r
+                WHERE r.batch_id = b.id) AS batch_pressure_max,
+            b.create_time       AS create_time
+        FROM t_monitor_batch b
+        INNER JOIN t_well_group g        ON g.id = b.well_group_id
+        INNER JOIN t_test_section s      ON s.id = b.test_section_id
+        INNER JOIN t_reinjection_shift sh ON sh.id = b.shift_id
+        INNER JOIN t_monitor_point mp    ON mp.id = b.monitor_point_id
+        <where>
+            <include refid="dataScope"/>
+            <include refid="filters"/>
+            <include refid="cursorSeek"/>
+        </where>
+        ORDER BY b.biz_date DESC, b.id ASC
+        LIMIT #{p.limit} OFFSET #{p.offset}
+    </select>
+
+    <select id="countBatches" resultType="long">
+        SELECT COUNT(*)
+        FROM t_monitor_batch b
+        <where>
+            <include refid="dataScope"/>
+            <include refid="filters"/>
+        </where>
+    </select>
+</mapper>
