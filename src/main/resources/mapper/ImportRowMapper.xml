@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.evops.geothermal.mapper.ImportRowMapper">
+
+    <!-- 分片内逐行明细的多行批量插入：降低 5 万行级导入的语句往返 -->
+    <insert id="batchInsert">
+        INSERT INTO t_import_row
+        (import_file_id, shard_id, row_no, object_code, serial_no, observed_at_raw,
+         result, fail_field, fail_value, fail_reason, biz_key, create_time)
+        VALUES
+        <foreach collection="rows" item="r" separator=",">
+            (#{r.importFileId}, #{r.shardId}, #{r.rowNo}, #{r.objectCode}, #{r.serialNo}, #{r.observedAtRaw},
+             #{r.result}, #{r.failField}, #{r.failValue}, #{r.failReason}, #{r.bizKey}, CURRENT_TIMESTAMP)
+        </foreach>
+    </insert>
+
+</mapper>

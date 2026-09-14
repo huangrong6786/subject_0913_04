@@ -80,6 +80,50 @@
   **40 井组压测：单条 `GROUP BY well_group_id` 集合 SQL 一次返回全部授权井组**压力
   min/max/avg/最新值，应用层不逐井发起查询（禁止 N+1）；窗口封顶 31 天，同样强制分区裁剪与租户/授权谓词。
 
+## 观测数据 CSV 批量导入（分片 / 幂等 / 断点续传 / 坏传感器隔离）
+
+井口网关观测数据（对象编号、观测时间、井口压力、温度、流量、回灌量、来源设备、序列号）
+通过 CSV 批量导入，落库到 `t_wellhead_observation`；导入任务/分片/逐行明细分别落
+`t_import_file` / `t_import_shard` / `t_import_row`，坏传感器名单落 `t_device_quarantine`。
+
+### CSV 格式（首行表头，支持中英文别名）
+
+```
+objectCode,observedAt,pressureMpa,temperatureC,flowM3h,injectionVolumeM3,sourceDevice,serialNo
+PT-IMP-001,2026-09-10 08:00:00,1.250,65.200,80.500,120.000,DEV-01,SN-000001
+```
+
+- 表头别名：`对象编号/观测时间/井口压力/温度/流量/回灌量/来源设备/序列号` 与下划线风格均可；必需列缺失时文件级拒绝。
+- 观测时间支持 `yyyy-MM-dd HH:mm:ss` / ISO8601；**跨天补报**按观测日派生 `biz_date`，未来数据（>当前+1天）拒绝。
+- 单位校验（物理量纲范围，超界判疑似单位错误/坏传感器）：压力 0-60 MPa、温度 -20~150 ℃、流量 0-500 m³/h、回灌量 0-100000 m³。
+- 序列校验：序列号 4-64 位、字母数字开头（可含 `_-:.`）。
+
+### REST 接口（均需 HTTP Basic）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/imports/observations` | multipart 上传（字段名 `file`）。同文件重复上传命中校验和幂等；有未完成分片时断点续传 |
+| GET  | `/api/imports/observations/{id}` | 任务汇总：total/success/updated/failed + 分片进度 |
+| GET  | `/api/imports/observations/{id}/rows?result=FAILED&page=&pageSize=` | 逐行明细（pageSize 1-100），失败行含**原始行号、失败字段、字段原值、失败原因** |
+| POST | `/api/imports/observations/{id}/retry` | 失败分片重试（FAILED/PENDING/PROCESSING 续跑，幂等） |
+| POST | `/api/imports/devices/quarantine` / `/devices/release` | 坏传感器隔离 / 解除（body：`{"deviceCode":...,"reason":...}`） |
+| GET  | `/api/imports/devices/quarantine` | 当前生效隔离名单 |
+
+### 困难级约束实现
+
+- **分片处理 ≥50,000 行**：按 `evops.import.shard-size`（默认 1000）切分，每分片独立
+  `REQUIRES_NEW` 事务，分片间互不回滚；合法/重复/缺列/坏数值混合行**逐行隔离**——
+  行级失败只落 `t_import_row` 明细，同分片其他行正常落库，整批不因单行失败回滚。
+- **双重幂等**：文件级 `(tenant_id, checksum)`（SHA-256）唯一，重复上传返回同一任务；
+  业务键 `(tenant_id, monitor_point_id, serial_no)` 与 `(tenant_id, monitor_point_id, observed_at)`
+  唯一——网关重发同序列号/跨文件重复导入记 **UPDATED** 幂等更新，同时刻异序列号记 FAILED（业务键冲突）。
+- **断点续传 / 失败重试**：原始文件内容入库；分片状态机 `PENDING/PROCESSING/SUCCESS/FAILED`，
+  崩溃残留（PROCESSING）与失败分片在重复上传或 retry 时续跑；行明细按 `(file,rowNo)` 唯一先清后写。
+- **锁定/验收保护**：观测日所属批次 `ACCEPTED`（已验收）/`ACCOUNTED`（已落账）或班次
+  `CLOSED`（已闭班锁定）时，该观测行 FAILED，**禁止覆盖**。
+- **坏传感器隔离**：检疫名单内设备的行逐行拦截（FAILED，不落观测表）；量纲校验同时拦截故障坏数值。
+- **审计**：每次导入执行在定稿时落一条 `IMPORT_FILE` 审计（请求号/操作者/业务时区/计数快照）。
+
 ### 压测演示数据
 
 `DemoDataSeeder`（幂等，已存在 `SEED-WG-*` 时跳过）：40 井组（两租户各 20）、
@@ -94,7 +138,7 @@ POST /api/admin/demo-seed        头：X-Seed-Token: <token>
 
 1. `mvn -q -DskipTests compile`
 2. `mvn spring-boot:run`（自动执行 `src/main/resources/schema.sql`，H2 文件在 `data/evops`）
-3. `mvn test`：**33 个测试全绿**（9 个闭环集成测试 + 4 个 REST 冒烟 + 13 个运营检索/遥测大规模测试 + 7 个运营 REST 冒烟）。
+3. `mvn test`：**45 个测试全绿**（9 个闭环集成 + 4 个 REST 冒烟 + 13 个运营检索/遥测大规模 + 7 个运营 REST 冒烟 + 9 个 CSV 导入集成 + 3 个导入 REST 冒烟）。
 
 集成测试（`src/test/java/com/evops/geothermal/`）覆盖困难级约束：
 
@@ -102,6 +146,8 @@ POST /api/admin/demo-seed        头：X-Seed-Token: <token>
 - **3 个业务日期**：2026-09-10 / 09-11 / 09-12；
 - **5 路并发写入**：同批次乐观锁竞争（只 1 路成功，失败事务读数回滚）与同请求号并发（只 1 路落账、审计仅 1 条）；
 - 同事务 + 审计四要素、业务键唯一、原子回滚、删除保护均有断言；
+- **CSV 批量导入**：合法/重复/缺列/坏数值混合行逐行隔离、文件校验和 + 业务键双重幂等、
+  已验收/已锁定禁覆盖、失败分片重试与断点续传、坏传感器隔离、跨天补报、**50000 行 50 分片**导入；
 - **运营检索**：40 井组/400 批次/100000 读数/150000 遥测上验证 ≥4 条件 AND/范围组合、
   游标与确定性主键分页序列一致、一对多关联不放大、pageSize 1-100、租户隔离与只读账号授权收敛、
   遥测分区裁剪精确计数、40 井组单集合 GROUP BY（无 N+1）。
