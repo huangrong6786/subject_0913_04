@@ -138,7 +138,7 @@ POST /api/admin/demo-seed        头：X-Seed-Token: <token>
 
 1. `mvn -q -DskipTests compile`
 2. `mvn spring-boot:run`（自动执行 `src/main/resources/schema.sql`，H2 文件在 `data/evops`）
-3. `mvn test`：**45 个测试全绿**（9 个闭环集成 + 4 个 REST 冒烟 + 13 个运营检索/遥测大规模 + 7 个运营 REST 冒烟 + 9 个 CSV 导入集成 + 3 个导入 REST 冒烟）。
+3. `mvn test`：**60 个测试全绿**（9 个闭环集成 + 4 个 REST 冒烟 + 13 个运营检索/遥测大规模 + 7 个运营 REST 冒烟 + 9 个 CSV 导入集成 + 3 个导入 REST 冒烟 + 第四期 6 个时序规则时间线单测 + 6 个规则计算集成 + 3 个时序 REST 冒烟）。
 
 集成测试（`src/test/java/com/evops/geothermal/`）覆盖困难级约束：
 
@@ -155,3 +155,72 @@ POST /api/admin/demo-seed        头：X-Seed-Token: <token>
 题包根目录的 `..\..\docs\schema\evops.sql` 是交付副本，应与工作区 `src/main/resources/schema.sql` 保持一致。
 
 题面和质检卷在上一级 `packets/` 目录；模型工作区不得复制 `answers.md`、验收测试或参考修正。
+
+## 井口监测时序规则（峰/平/谷）版本化与试验窗口规则计算（第四期）
+
+运营人员为监测对象（监测点 / 井组）维护**峰 PEAK、平 FLAT、谷 VALLEY** 三类日周期业务区间，
+系统按对象（井场）时区把试验窗口内的观测归入唯一区间，逐观测生成计算明细，并按观测时刻选用
+当时生效的压力阈值版本。
+
+### 版本化规则模型（规则启用后不能原地修改）
+
+- `t_tou_rule_chain` 规则链（一个对象唯一一条，`(tenant_id,target_type,target_id)` 唯一）
+  → `t_tou_rule_set` 规则版本（链上 version_no 递增，携带生效窗口、压力阈值、冻结快照）
+  → `t_tou_interval` 峰平谷区间（一天 1440 分钟圆环上的左闭右开区间，支持跨午夜）。
+- 版本生命周期 **DRAFT → ENABLED → SUPERSEDED**：只有草稿可增删改区间；
+  **启用即冻结**——区间行与 `frozen_snapshot` 永不再改，原地修改/删除/重复启用一律 `FROZEN_RULE` 拒绝；
+  业务变更只能基于历史版本 `clone` 出新草稿（区间复制后调整），再启用为下一版本。
+- 新版本启用时，上一版本生效窗口在新版本起点处左闭右开闭合 `[from, newFrom)` 并置 SUPERSEDED；
+  历史计算明细永久保留 `rule_set_id/version_no` 与当时系数/阈值，**历史结果读取当时快照**，
+  规则后续迭代不影响历史结果（详情接口只读取结果头/明细落库行，不回查现行规则表）。
+- **规则区间重叠必须拒绝**：启用校验（草稿维护时也即时校验）在 1440 分钟圆环上做 BitSet 交集判定，
+  端点相接（如 `[..,06:00)+[06:00,..)`）合法，分钟相交即 `INTERVAL_OVERLAP` 拒绝；
+  同时强制完整覆盖 1440 分钟（`INTERVAL_NOT_COVERED`）且峰/平/谷三类齐备（`SEGMENT_INCOMPLETE`）。
+
+### REST 接口（均需 HTTP Basic；写请求带 X-Request-No / X-Operator-Id / X-Biz-Timezone 头）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/tou/chains` | 规则链建档（targetType=MONITOR_POINT/WELL_GROUP + targetId） |
+| GET  | `/api/tou/chains`、`/api/tou/chains/{id}` | 规则链列表（只读账号按井组授权收敛，且拒绝写规则）/详情 |
+| POST | `/api/tou/chains/{id}/versions` | 新建草稿版本（生效起点、压力阈值、初始峰平谷区间） |
+| GET  | `/api/tou/chains/{id}/versions`、`/api/tou/versions/{setId}` | 版本链 / 版本详情（含区间） |
+| POST | `/api/tou/versions/{setId}/clone` | 基于历史版本开新草稿（不能原地修改，只能迭代新版本） |
+| POST/PUT/DELETE | `/api/tou/versions/{setId}/intervals/{intervalCode}` | 草稿区间新增/修改/删除（仅 DRAFT，重叠即时拒绝） |
+| POST | `/api/tou/versions/{setId}/enable` | 草稿启用冻结（重叠/缺口/缺峰平谷一律拒绝） |
+| DELETE | `/api/tou/versions/{setId}` | 删除草稿（已启用版本永久保留，拒绝删除） |
+| POST | `/api/tou/calculations` | 执行试验窗口规则计算（body：targetType/targetId/windowStart/windowEnd） |
+| GET  | `/api/tou/calculations`、`/api/tou/calculations/{id}` | 结果列表 / 结果详情（头+逐观测明细+峰平谷分段合计） |
+
+井组建档 `POST /api/well-groups` 新增可选 `timezone`（井场时区，缺省 Asia/Shanghai）。
+
+### 困难级约束实现
+
+- **业务时区跨日 + 左闭右开**：试验窗口 `[windowStart, windowEnd)` 按井场时区（`t_well_group.timezone`，
+  监测点沿试验段→井组解析）取数，**窗口终点时刻的观测不计入**；日区间为 `[startMinute,endMinute)`，
+  `end<=start` 表示跨午夜（如谷段 22:00-次日 06:00）。凌晨 00:30 的观测归入**前一日 22:00 启动的
+  跨午夜区间实例**（明细落 `day_offset=-1`、实际实例 `[segment_start,segment_end)` 与归属业务日期），
+  保证跨午夜班次**不重复计量**。
+- **至少 4 个版本化规则**：测试在一条链上启用 v1..v4，阈值 1.2→1.4→1.6→1.8 MPa，
+  v4 同时改变区间形状（谷段 23:00-07:00），验证同一跨午夜观测在 v3/v4 下归入不同实例边界。
+- **压力阈值按生效时间选版本**：逐条观测按 `observed_at` 选取当时 ENABLED/SUPERSEDED 版本
+  （生效窗口 `effective_from <= t < effective_to`），明细保留版本号、阈值快照与超阈判定
+  （`pressure_mpa > threshold`，严格大于）。
+- **BigDecimal 累计、最终统一舍入**：`回灌量 × 时段系数` 全程 BigDecimal 精确值（明细 DECIMAL(20,9)，
+  不做行内舍入），仅结果头合计最后一步 `setScale(3, HALF_UP)`；快照另存舍入前精确合计
+  `exactTotalBeforeRounding`。专门用例验证 3×(1×0.333333)=0.999999 最终舍入为 1.000（逐行舍入会得 0.999）。
+- **不能因并发重算产生两份结果**：结果头对 `(tenant_id,target_type,target_id,window_start,window_end)`
+  建唯一索引；计算在独立事务内先对规则链行 `FOR UPDATE` 加锁并复查，同窗口重放幂等返回既有结果；
+  并发撞唯一索引时事务回滚、外壳捕获后返回赢家结果。5 路并发重算测试：结果头 1 份、
+  每观测 1 条明细、`CALCULATE` 审计仅 1 条。
+- **窗口重叠拒绝**：已算窗口与新窗口左闭右开相交（`a < end && start < b`）即 `WINDOW_OVERLAP` 拒绝；
+  端点邻接（一窗口终点=另一窗口起点）合法，共享端点时刻的观测只在含该时刻的窗口计量一次。
+
+### 测试
+
+`mvn test`：**60 个测试全绿**（在原 45 个基础上新增 15 个）：
+
+- `tou/DailyTimelineTest`（6）：圆环区间重叠/全覆盖、左闭右开端点归类、跨午夜实例 dayOffset=-1；
+- `TouRuleCalcIntegrationTest`（6）：≥4 版本规则、时区跨日、左闭右开边界、阈值按生效时间选版本、
+  历史快照不变、BigDecimal 最终统一舍入、重叠拒绝/冻结不可改、窗口幂等/邻接不重复、5 路并发唯一；
+- `TouRestApiTest`（3）：Basic 认证强制、规则建档-重叠拒绝-启用-冻结拒绝-计算-幂等-历史读取全链路、只读账号 t1view 按井组授权收敛（未授权不可见、授权后可读，且拒绝写操作）。

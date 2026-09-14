@@ -10,6 +10,7 @@ public class WellGroup extends BaseEntity {
     private String groupCode;
     private String groupName;
     private String location;
+    private String timezone;                  // 井场时区（试验窗口/观测归类按此时区解释）
     private String status;
     @Version
     private Integer version;
@@ -22,6 +23,8 @@ public class WellGroup extends BaseEntity {
     public void setGroupName(String groupName) { this.groupName = groupName; }
     public String getLocation() { return location; }
     public void setLocation(String location) { this.location = location; }
+    public String getTimezone() { return timezone; }
+    public void setTimezone(String timezone) { this.timezone = timezone; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public Integer getVersion() { return version; }

@@ -98,10 +98,18 @@ public class GeothermalService {
         if (tz == null || tz.trim().isEmpty()) {
             return "Asia/Shanghai";
         }
+        return normalizeTimezone(tz);
+    }
+
+    /** 井场时区规范化与合法性校验。 */
+    static String normalizeTimezone(String tz) {
+        if (tz == null || tz.trim().isEmpty()) {
+            return "Asia/Shanghai";
+        }
         try {
-            return ZoneId.of(tz).getId();
+            return ZoneId.of(tz.trim()).getId();
         } catch (Exception ex) {
-            throw new BizException("非法业务时区: " + tz);
+            throw new BizException("VALIDATION", "非法井场时区: " + tz);
         }
     }
 
@@ -117,6 +125,7 @@ public class GeothermalService {
         group.setGroupCode(req.getGroupCode());
         group.setGroupName(req.getGroupName());
         group.setLocation(req.getLocation());
+        group.setTimezone(normalizeTimezone(req.getTimezone()));
         group.setStatus("ACTIVE");
         groupMapper.insert(group);
         auditService.record("WELL_GROUP", group.getId(), "CREATE",
